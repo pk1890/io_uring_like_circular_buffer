@@ -52,15 +52,15 @@ impl CircullarBuffer{
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     &preamble as *const BufferEntryPreamble,
-                    self.write_pointer as *mut _,
+                    self.write_pointer as *mut BufferEntryPreamble,
                     1,
                 );
 
                 self.write_pointer += size_of::<BufferEntryPreamble>() as u64;
 
                 core::ptr::copy_nonoverlapping(
-                    &value as *const _,
-                    self.write_pointer as *mut _,
+                    &value as *const T,
+                    self.write_pointer as *mut T,
                     1,
                 );
                 
@@ -70,7 +70,21 @@ impl CircullarBuffer{
         }
     }
 
-    // fn read_value<T>(&mut self)
+    fn read_value<T>(&mut self) -> T{
+        let mut res: T;
+
+        unsafe{
+            self.read_pointer += size_of::<BufferEntryPreamble>() as u64;
+            core::ptr::copy_nonoverlapping(
+                self.read_pointer as *const T,
+                &mut res as *mut T,
+                1
+            );
+        }
+
+        res
+
+    }
 
     pub fn add_value(&mut self, entry: BufferEntry){
         match entry{
