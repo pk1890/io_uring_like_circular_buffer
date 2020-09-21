@@ -88,22 +88,35 @@ impl CircullarBuffer{
 
     // }
 
-    pub fn add_value(&mut self, data: &[u8]){
+    pub fn reserve(&mut self, size: usize) -> &mut [u8]{
         unsafe{
             let mut pointer = self.write_pointer.load(Ordering::Acquire);
+            let alignment = core::mem::align_of::<usize>();
+            let modulo = (pointer as usize ) % alignment; 
+            if modulo != 0 {
+                pointer = pointer.add(alignment - ( (pointer as usize ) % alignment)); // Align pointer to usize alignment
+            }
             core::ptr::copy_nonoverlapping(
-                &data.len() as *const _ as *const u64,
-                pointer as *mut u64,
+                &size as *const usize,
+                pointer as *mut usize,
                 1
             );
-            pointer = pointer.add(8); //add u64
-            core::ptr::copy_nonoverlapping(
-                data as *const _ as *const u8,
-                pointer,
-                data.len()
-            );
-            pointer = pointer.add(data.len());
-            self.write_pointer.store(pointer, Ordering::Release);
+            pointer = pointer.add(size_of::<usize>()); //set pointer after inserted usize
+            core::slice::from_raw_parts_mut::<u8>(pointer, size)
+        }
+        
+    }
+
+    pub fn declare(&mut self){
+        unsafe{
+            let pointer = self.write_pointer.load(Ordering::Acquire);
+            let alignment = core::mem::align_of::<usize>();
+            let modulo = (pointer as usize ) % alignment; 
+            let difference = if modulo == 0 {0} else {alignment - ( (pointer as usize ) % alignment)}; // Align pointer to usize alignment
+            let size = *(pointer.add(difference) as *const usize);
+            println!("{}", size);
+            self.write_pointer.store(pointer.add(difference+core::mem::size_of::<usize>()+size), Ordering::Release);
+            println!("{:#018x}", self.write_pointer.load(Ordering::Acquire) as usize);
         }
     }
 }
@@ -113,12 +126,23 @@ fn main() {
     println!("Hello, world!");
     let mut buff = CircullarBuffer::new();
 
-    buff.add_value(&[69]);
-    buff.add_value(&[21, 37]);
-    buff.add_value(&[23, 12, 32, 12]);
-
+    let a = buff.reserve(3);
+    a[0] = 4;
+    a[1] = 15;
+    a[2] = 100;
+    let addr = &buff.data as *const _ as usize; 
     for i in 0..30{
-        println!("{}: {}", i, buff.data[i]);
+        println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
+    }
+    println!("SECOND ROUND");
+    buff.declare();
+    let b = buff.reserve(2);
+    b[0] = 69;
+    b[1] = 88;
+
+    let addr = &buff.data as *const _ as usize; 
+    for i in 0..30{
+        println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
     }
 }
 
