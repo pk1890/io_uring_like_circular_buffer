@@ -16,6 +16,7 @@ enum BufferGetValueError{
 #[repr(C)]
 struct ReservedMemory<'a>{
     memory: &'a mut [u8],
+    control: &'a mut usize,
     buffer: &'a CircullarBuffer,
 }
 
@@ -36,6 +37,8 @@ impl<'a> core::ops::DerefMut for ReservedMemory<'a>{
 
 impl<'a> Drop for ReservedMemory<'a>{
     fn drop(&mut self) {
+        let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+        *(self.control) |= only_msb_of_usize;
         self.buffer.declare();
     }
 }
@@ -55,9 +58,16 @@ impl<'a> core::ops::Deref for ReturnedValue<'a>{
     }
 }
 
+impl<'a> Drop for ReturnedValue<'a>{
+    fn drop(&mut self){
+        // self.buffer.release()
+    }
+}
+
 #[repr(C)]
 struct CircullarBuffer{
     data: [u8; BUFFER_SIZE],
+    additional_data: [u8; BUFFER_SIZE],
     read_pointer: AtomicPtr<u8>,
     write_pointer: AtomicPtr<u8>,
     release_pointer: AtomicPtr<u8>,
@@ -69,6 +79,7 @@ impl CircullarBuffer{
     pub fn new() -> Self{
         let mut buff = CircullarBuffer{
             data: [0;BUFFER_SIZE],
+            additional_data: [0;BUFFER_SIZE],
             reservation_pointer: AtomicPtr::new(&mut 0),
             write_pointer: AtomicPtr::new(&mut 0),
             read_pointer: AtomicPtr::new(&mut 0),
@@ -115,9 +126,12 @@ impl CircullarBuffer{
                 pointer as *mut usize,
                 1
             );
+            let control_usize = &mut *(pointer as *mut usize);
+
             pointer = pointer.add(size_of::<usize>()); //set pointer after inserted usize
             let res = ReservedMemory{
                 memory: core::slice::from_raw_parts_mut::<u8>(pointer, size),
+                control: control_usize,
                 buffer: self,
             };
             self.reservation_pointer.store(pointer.add(size), Ordering::Release);
@@ -132,23 +146,23 @@ impl CircullarBuffer{
         let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
         let mut pointer = self.write_pointer.load(Ordering::Acquire);
         let alignment = core::mem::align_of::<usize>();
-        let modulo = (pointer as usize ) % alignment; 
-        let difference = if modulo == 0 {0} else {alignment - ( (pointer as usize ) % alignment)}; // Align pointer to usize alignment
+        let mut changed = false;
         unsafe{
-            let size = &mut (*((pointer.add(difference) as *mut usize)));
-            let size_value = *size & !only_msb_of_usize;
-
-            pointer = pointer.add(difference+core::mem::size_of::<usize>()+size_value);
-            *size |= only_msb_of_usize;
             loop{
-                let size = *(pointer.add(difference) as *const usize) & !only_msb_of_usize;
+                let modulo = (pointer as usize ) % alignment; 
                 let difference = if modulo == 0 {0} else {alignment - ( (pointer as usize ) % alignment)}; // Align pointer to usize alignment
-                
-                if size >> core::mem::size_of::<usize>()*8-1 == 0{
-                    self.write_pointer.store(pointer, Ordering::Release);
+                pointer = pointer.add(difference);
+
+                if *(pointer as *const usize) & only_msb_of_usize == 0 {
+                    if changed {
+                        self.write_pointer.store(pointer, Ordering::Release);
+                    }
                     return;
                 }
-                pointer = pointer.add(difference+core::mem::size_of::<usize>()+size);
+                let size = *(pointer as *const usize) & !only_msb_of_usize;
+                
+                pointer = pointer.add(core::mem::size_of::<usize>()+size);
+                changed = true;
             }
 
         }
@@ -191,29 +205,31 @@ fn main() {
         let mut a = buff.reserve(3).expect("No i za duze");
         a[0] = 4;
         a[1] = 15;
-        a[2] = 100;
+        {
+            let mut b = buff.reserve(2).expect("No i za duze");
+            b[0] = 69;
+            b[1] = 88;
+        }
         let addr = &buff.data as *const _ as usize; 
         for i in 0..BUFFER_SIZE{
             println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
         }
         println!("SECOND ROUND");
-        let mut b = buff.reserve(2).expect("No i za duze");
-        b[0] = 69;
-        b[1] = 88;
-
+        a[2] = 100;
+        
     }
     let addr = &buff.data as *const _ as usize; 
     for i in 0..BUFFER_SIZE{
         println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
     }
 
-    loop{
-        println!("GETTING AN ELEMENT FROM BUFFER");
-        let res = buff.get_value().expect("Nie ma tu nic");
-        for elem in (*res).iter(){
-            println!("{}", elem);
-        }
-    }
+    // loop{
+    //     println!("GETTING AN ELEMENT FROM BUFFER");
+    //     let res = buff.get_value().expect("Nie ma tu nic");
+    //     for elem in (*res).iter(){
+    //         println!("{}", elem);
+    //     }
+    // }
 
 }
 
