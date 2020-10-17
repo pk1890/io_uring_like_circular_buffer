@@ -169,21 +169,25 @@ impl CircullarBuffer{
     }
 
     pub fn get_value(&self) -> Result<ReturnedValue, BufferGetValueError>{
-        let mut read_pointer = self.read_pointer.load(Ordering::Acquire);
-        let write_pointer = self.write_pointer.load(Ordering::Acquire);
-        if read_pointer as usize == write_pointer as usize{
-            return Err(BufferGetValueError::NoValueInBuffer);
-        }
-
-        let alignment = core::mem::align_of::<usize>();
-        let modulo = (read_pointer as usize ) % alignment; 
-        let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
         unsafe{
+            let mut read_pointer = self.read_pointer.load(Ordering::Acquire);
+            let write_pointer = self.write_pointer.load(Ordering::Acquire);
+            
+            let alignment = core::mem::align_of::<usize>();
+            let modulo = (read_pointer as usize ) % alignment; 
+            let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+
             if modulo != 0 {
                 read_pointer = read_pointer.add(alignment - ( (read_pointer as usize ) % alignment)); // Align pointer to usize alignment
             }
 
+            if read_pointer as usize == write_pointer as usize{
+                return Err(BufferGetValueError::NoValueInBuffer);
+            }
+
+
             let size = *(read_pointer as *const usize) & !only_msb_of_usize;
+
 
             read_pointer = read_pointer.add(core::mem::size_of::<usize>());
             let res = ReturnedValue{
@@ -210,26 +214,26 @@ fn main() {
             b[0] = 69;
             b[1] = 88;
         }
-        let addr = &buff.data as *const _ as usize; 
-        for i in 0..BUFFER_SIZE{
-            println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
-        }
+        // let addr = &buff.data as *const _ as usize; 
+        // for i in 0..BUFFER_SIZE{
+            // println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
+        // }
         println!("SECOND ROUND");
         a[2] = 100;
         
     }
-    let addr = &buff.data as *const _ as usize; 
-    for i in 0..BUFFER_SIZE{
-        println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
-    }
-
-    // loop{
-    //     println!("GETTING AN ELEMENT FROM BUFFER");
-    //     let res = buff.get_value().expect("Nie ma tu nic");
-    //     for elem in (*res).iter(){
-    //         println!("{}", elem);
-    //     }
+    // let addr = &buff.data as *const _ as usize; 
+    // for i in 0..BUFFER_SIZE{
+    //     println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
     // }
+
+    loop{
+        println!("GETTING AN ELEMENT FROM BUFFER");
+        let res = buff.get_value().expect("Nie ma tu nic");
+        for elem in (*res).iter(){
+            println!("{}", elem);
+        }
+    }
 
 }
 
