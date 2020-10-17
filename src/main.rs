@@ -1,7 +1,7 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-const BUFFER_SIZE: usize = 30;
+const BUFFER_SIZE: usize = 2048;
 
 #[derive(Debug)]
 enum BufferAddValueError{
@@ -47,6 +47,7 @@ impl<'a> Drop for ReservedMemory<'a>{
 #[repr(C)]
 struct ReturnedValue<'a>{
     memory: &'a [u8],
+    control: &'a mut usize,
     buffer: &'a CircullarBuffer,
 }
 
@@ -60,7 +61,9 @@ impl<'a> core::ops::Deref for ReturnedValue<'a>{
 
 impl<'a> Drop for ReturnedValue<'a>{
     fn drop(&mut self){
-        // self.buffer.release()
+        let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+        *(self.control) |= only_msb_of_usize;
+        self.buffer.release()
     }
 }
 
@@ -103,9 +106,21 @@ impl CircullarBuffer{
         buff
     }
 
+    pub fn print_status(&self){
+        println!("\tres: {:#018x},\twrite: {:#018x},\tread: {:#018x},\trel: {:#018x}", 
+            self.reservation_pointer.load(Ordering::Acquire) as usize,
+            self.write_pointer.load(Ordering::Acquire) as usize,
+            self.read_pointer.load(Ordering::Acquire) as usize,
+            self.release_pointer.load(Ordering::Acquire) as usize);
+    }
 
     pub fn reserve(&self, size: usize) -> Result<ReservedMemory, BufferAddValueError>{
-        if size >> core::mem::size_of::<usize>()*8-1 != 0 {
+        print!("START RESERVATION");
+        self.print_status();
+
+        let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+
+        if size & only_msb_of_usize != 0 {
             return Err(BufferAddValueError::SizeTooBig);
         }
         unsafe{
@@ -117,7 +132,8 @@ impl CircullarBuffer{
             }
 
             let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
-            if pointer as usize > end_of_buffer || end_of_buffer - (pointer as usize) - core::mem::size_of::<usize>() < size{
+            let release_pointer = self.release_pointer.load(Ordering::Acquire);
+            if (release_pointer as usize) + BUFFER_SIZE - (pointer as usize) - core::mem::size_of::<usize>() < size{
                 return Err(BufferAddValueError::SizeTooBig);
             }
 
@@ -134,12 +150,28 @@ impl CircullarBuffer{
                 control: control_usize,
                 buffer: self,
             };
-            self.reservation_pointer.store(pointer.add(size), Ordering::Release);
+
+            pointer = pointer.add(size);
+
+            let modulo = (pointer as usize ) % alignment; 
+            if modulo != 0 {
+                pointer = pointer.add(alignment - ( (pointer as usize ) % alignment)); // Align pointer to usize alignment
+            }
+
+            if pointer as usize + size >= end_of_buffer{
+                self.reservation_pointer.store(pointer.sub(BUFFER_SIZE), Ordering::Release);
+            } else {
+                self.reservation_pointer.store(pointer, Ordering::Release);
+            }
+            print!("END RESERVATION      ");
+            self.print_status();
             Ok(res)
         }
     }
 
     fn declare(&self){
+        print!("START DECLARATION");
+        self.print_status();
         if self.reservation_pointer.load(Ordering::Acquire) as u64 == self.write_pointer.load(Ordering::Acquire) as u64{
             return;
         }
@@ -147,20 +179,34 @@ impl CircullarBuffer{
         let mut pointer = self.write_pointer.load(Ordering::Acquire);
         let alignment = core::mem::align_of::<usize>();
         let mut changed = false;
+        let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
+
         unsafe{
             loop{
                 let modulo = (pointer as usize ) % alignment; 
                 let difference = if modulo == 0 {0} else {alignment - ( (pointer as usize ) % alignment)}; // Align pointer to usize alignment
                 pointer = pointer.add(difference);
+                
+                let size_ref = &mut *(pointer as *mut usize);
 
-                if *(pointer as *const usize) & only_msb_of_usize == 0 {
+                if *size_ref & only_msb_of_usize == 0 {
                     if changed {
-                        self.write_pointer.store(pointer, Ordering::Release);
+                        if pointer as usize >= end_of_buffer{
+                            self.write_pointer.store(pointer.sub(BUFFER_SIZE), Ordering::Release);
+                        } else {
+                            self.write_pointer.store(pointer, Ordering::Release);
+                        }
                     }
+
+                    print!("END DECLARATION");
+                    self.print_status();
+
                     return;
                 }
-                let size = *(pointer as *const usize) & !only_msb_of_usize;
-                
+
+                let size = *size_ref & !only_msb_of_usize;
+                *size_ref &= !only_msb_of_usize; // zero the control bit
+
                 pointer = pointer.add(core::mem::size_of::<usize>()+size);
                 changed = true;
             }
@@ -170,12 +216,17 @@ impl CircullarBuffer{
 
     pub fn get_value(&self) -> Result<ReturnedValue, BufferGetValueError>{
         unsafe{
+
+            print!("START GETVAL");
+            self.print_status();
+
             let mut read_pointer = self.read_pointer.load(Ordering::Acquire);
             let write_pointer = self.write_pointer.load(Ordering::Acquire);
             
             let alignment = core::mem::align_of::<usize>();
             let modulo = (read_pointer as usize ) % alignment; 
             let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+            let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
 
             if modulo != 0 {
                 read_pointer = read_pointer.add(alignment - ( (read_pointer as usize ) % alignment)); // Align pointer to usize alignment
@@ -187,15 +238,78 @@ impl CircullarBuffer{
 
 
             let size = *(read_pointer as *const usize) & !only_msb_of_usize;
-
+            let control_usize = &mut *(read_pointer as *mut usize);
 
             read_pointer = read_pointer.add(core::mem::size_of::<usize>());
             let res = ReturnedValue{
                 memory: core::slice::from_raw_parts(read_pointer, size),
+                control: control_usize,
                 buffer: self
             };
-            self.read_pointer.store(read_pointer.add(size), Ordering::Release);
+
+
+            read_pointer = read_pointer.add(size);
+
+            let modulo = (read_pointer as usize ) % alignment; 
+            if modulo != 0 {
+                read_pointer = read_pointer.add(alignment - ( (read_pointer as usize ) % alignment)); // Align pointer to usize alignment
+            }
+
+
+            if read_pointer as usize >= end_of_buffer{
+                self.read_pointer.store(read_pointer.sub(BUFFER_SIZE), Ordering::Release);
+            } else {
+                self.read_pointer.store(read_pointer, Ordering::Release);
+            }
+
+            print!("END GETVAL");
+            self.print_status();
             Ok(res)
+        }
+    }
+
+    pub fn release(&self){
+        print!("START RELEASE");
+        self.print_status();
+
+        if self.release_pointer.load(Ordering::Acquire) as u64 == self.read_pointer.load(Ordering::Acquire) as u64{
+            return;
+        }
+        let only_msb_of_usize = 1 << core::mem::size_of::<usize>()*8-1;
+        let mut pointer = self.release_pointer.load(Ordering::Acquire);
+        let alignment = core::mem::align_of::<usize>();
+        let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
+        let mut changed = false;
+        unsafe{
+            loop{
+                let modulo = (pointer as usize ) % alignment; 
+                let difference = if modulo == 0 {0} else {alignment - ( (pointer as usize ) % alignment)}; // Align pointer to usize alignment
+                pointer = pointer.add(difference);
+                
+                let size_ref = &mut *(pointer as *mut usize);
+
+                if *size_ref & only_msb_of_usize == 0 {
+                    if changed {
+                        if pointer as usize >= end_of_buffer{
+                            self.release_pointer.store(pointer.sub(BUFFER_SIZE), Ordering::Release);
+                        } else{
+                            self.release_pointer.store(pointer, Ordering::Release);
+                        }
+                    }
+
+                    print!("END RELEASE");
+                    self.print_status();
+
+                    return;
+                }
+
+                let size = *size_ref & !only_msb_of_usize;
+                *size_ref &= !only_msb_of_usize; // zero the control bit
+
+                pointer = pointer.add(core::mem::size_of::<usize>()+size);
+                changed = true;
+            }
+
         }
     }
 }
@@ -204,28 +318,34 @@ impl CircullarBuffer{
 fn main() {
     println!("Hello, world!");
     let buff = CircullarBuffer::new();
-    {
-
-        let mut a = buff.reserve(3).expect("No i za duze");
-        a[0] = 4;
-        a[1] = 15;
-        {
-            let mut b = buff.reserve(2).expect("No i za duze");
-            b[0] = 69;
-            b[1] = 88;
+    let mut j : u8 = 0;
+    for i in 0u64..200000 {
+        j = j + 1;
+        if j > 250 {
+            j = 0;
         }
+        {
+            let mut a = buff.reserve(300).expect("No i za duze");
+            a[0] = j;
+            a[1] = j+1;
+            a[2] = j+2;
+        }
+        {
+            let res = buff.get_value().expect("Nie ma tu nic");
+            for elem in (*res).iter(){
+                // println!("{}", elem);
+            }
+        }
+        println!("{}",i);
+        
         // let addr = &buff.data as *const _ as usize; 
         // for i in 0..BUFFER_SIZE{
-            // println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
-        // }
-        println!("SECOND ROUND");
-        a[2] = 100;
+            //     println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
+            // }
+            // println!("SECOND ROUND");
         
     }
-    // let addr = &buff.data as *const _ as usize; 
-    // for i in 0..BUFFER_SIZE{
-    //     println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
-    // }
+
 
     loop{
         println!("GETTING AN ELEMENT FROM BUFFER");
