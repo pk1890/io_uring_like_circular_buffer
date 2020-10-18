@@ -1,6 +1,8 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use rand::Rng;
+
 const BUFFER_SIZE: usize = 2048;
 
 #[derive(Debug)]
@@ -158,7 +160,7 @@ impl CircullarBuffer{
                 pointer = pointer.add(alignment - ( (pointer as usize ) % alignment)); // Align pointer to usize alignment
             }
 
-            if pointer as usize + size >= end_of_buffer{
+            if pointer as usize >= end_of_buffer{
                 self.reservation_pointer.store(pointer.sub(BUFFER_SIZE), Ordering::Release);
             } else {
                 self.reservation_pointer.store(pointer, Ordering::Release);
@@ -191,6 +193,7 @@ impl CircullarBuffer{
 
                 if *size_ref & only_msb_of_usize == 0 {
                     if changed {
+                        println!("POINTER: {:#018x}, EOB: {:#018x}", pointer as usize, end_of_buffer);
                         if pointer as usize >= end_of_buffer{
                             self.write_pointer.store(pointer.sub(BUFFER_SIZE), Ordering::Release);
                         } else {
@@ -318,14 +321,21 @@ impl CircullarBuffer{
 fn main() {
     println!("Hello, world!");
     let buff = CircullarBuffer::new();
+    let mut rng = rand::thread_rng();
     let mut j : u8 = 0;
-    for i in 0u64..200000 {
+    for i in 0u64..20000 {
         j = j + 1;
         if j > 250 {
             j = 0;
         }
         {
-            let mut a = buff.reserve(300).expect("No i za duze");
+            let mut a = buff.reserve(rng.gen_range(4, 400)).expect("No i za duze");
+            a[0] = j;
+            a[1] = j+1;
+            a[2] = j+2;
+        }
+        {
+            let mut a = buff.reserve(rng.gen_range(4, 400)).expect("No i za duze");
             a[0] = j;
             a[1] = j+1;
             a[2] = j+2;
@@ -336,24 +346,18 @@ fn main() {
                 // println!("{}", elem);
             }
         }
+        {
+            let res = buff.get_value().expect("Nie ma tu nic");
+            for elem in (*res).iter(){
+                // println!("{}", elem);
+            }
+        }
         println!("{}",i);
         
-        // let addr = &buff.data as *const _ as usize; 
-        // for i in 0..BUFFER_SIZE{
-            //     println!("({}){:#018x}: {}", i, addr+i, buff.data[i]);
-            // }
-            // println!("SECOND ROUND");
-        
     }
 
+    println!("OK!");
 
-    loop{
-        println!("GETTING AN ELEMENT FROM BUFFER");
-        let res = buff.get_value().expect("Nie ma tu nic");
-        for elem in (*res).iter(){
-            println!("{}", elem);
-        }
-    }
 
 }
 
