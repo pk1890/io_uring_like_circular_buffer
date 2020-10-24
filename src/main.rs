@@ -1,9 +1,9 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use rand::Rng;
-
 const BUFFER_SIZE: usize = 2048;
+
+use rand::Rng;
 
 #[derive(Debug)]
 enum BufferAddValueError {
@@ -42,6 +42,15 @@ impl<'a> Drop for ReservedMemory<'a> {
         *(self.control) |= only_msb_of_usize;
         self.buffer.declare();
     }
+}
+
+pub unsafe fn align_ptr_to_usize(pointer: *mut u8) -> *mut u8 {
+    let alignment = core::mem::align_of::<usize>();
+    let modulo = (pointer as usize) % alignment;
+    if modulo != 0 {
+        return pointer.add(alignment - ((pointer as usize) % alignment));
+    }
+    pointer
 }
 
 #[repr(C)]
@@ -89,20 +98,15 @@ impl CircullarBuffer {
         };
 
         let address = &mut buff as *mut _ as *mut u8;
-        let alignment = core::mem::align_of::<usize>();
-        let modulo = (address as usize) % alignment;
-        let offset = if modulo != 0 {
-            alignment - ((address as usize) % alignment) // Align pointer to usize alignment
-        } else {
-            0
-        };
-        let start_address = (address as usize + offset) as *mut u8;
-        buff.reservation_pointer
-            .store(start_address, Ordering::Relaxed);
-        buff.write_pointer.store(start_address, Ordering::Relaxed);
-        buff.read_pointer.store(start_address, Ordering::Relaxed);
-        buff.release_pointer.store(start_address, Ordering::Relaxed);
 
+        unsafe {
+            let start_address = align_ptr_to_usize(address);
+            buff.reservation_pointer
+                .store(start_address, Ordering::Relaxed);
+            buff.write_pointer.store(start_address, Ordering::Relaxed);
+            buff.read_pointer.store(start_address, Ordering::Relaxed);
+            buff.release_pointer.store(start_address, Ordering::Relaxed);
+        }
         println!("{:#018x}", address as u64);
 
         buff
@@ -128,13 +132,7 @@ impl CircullarBuffer {
             return Err(BufferAddValueError::SizeTooBig);
         }
         unsafe {
-            let mut pointer = self.reservation_pointer.load(Ordering::Acquire);
-            let alignment = core::mem::align_of::<usize>();
-            let modulo = (pointer as usize) % alignment;
-            if modulo != 0 {
-                pointer = pointer.add(alignment - ((pointer as usize) % alignment));
-                // Align pointer to usize alignment
-            }
+            let mut pointer = align_ptr_to_usize(self.reservation_pointer.load(Ordering::Acquire));
 
             let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
             let release_pointer = self.release_pointer.load(Ordering::Acquire);
@@ -156,13 +154,7 @@ impl CircullarBuffer {
                 buffer: self,
             };
 
-            pointer = pointer.add(size);
-
-            let modulo = (pointer as usize) % alignment;
-            if modulo != 0 {
-                pointer = pointer.add(alignment - ((pointer as usize) % alignment));
-                // Align pointer to usize alignment
-            }
+            pointer = align_ptr_to_usize(pointer.add(size));
 
             if pointer as usize >= end_of_buffer {
                 self.reservation_pointer
@@ -186,20 +178,12 @@ impl CircullarBuffer {
         }
         let only_msb_of_usize = 1 << (core::mem::size_of::<usize>() * 8 - 1);
         let mut pointer = self.write_pointer.load(Ordering::Acquire);
-        let alignment = core::mem::align_of::<usize>();
         let mut changed = false;
         let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
 
         unsafe {
             loop {
-                let modulo = (pointer as usize) % alignment;
-                let difference = if modulo == 0 {
-                    0
-                } else {
-                    alignment - ((pointer as usize) % alignment)
-                }; // Align pointer to usize alignment
-                pointer = pointer.add(difference);
-
+                pointer = align_ptr_to_usize(pointer);
                 let size_ref = &mut *(pointer as *mut usize);
 
                 if *size_ref & only_msb_of_usize == 0 {
@@ -239,15 +223,8 @@ impl CircullarBuffer {
             let mut read_pointer = self.read_pointer.load(Ordering::Acquire);
             let write_pointer = self.write_pointer.load(Ordering::Acquire);
 
-            let alignment = core::mem::align_of::<usize>();
-            let modulo = (read_pointer as usize) % alignment;
             let only_msb_of_usize = 1 << (core::mem::size_of::<usize>() * 8 - 1);
             let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
-
-            if modulo != 0 {
-                read_pointer = read_pointer.add(alignment - ((read_pointer as usize) % alignment));
-                // Align pointer to usize alignment
-            }
 
             if read_pointer as usize == write_pointer as usize {
                 return Err(BufferGetValueError::NoValueInBuffer);
@@ -263,13 +240,7 @@ impl CircullarBuffer {
                 buffer: self,
             };
 
-            read_pointer = read_pointer.add(size);
-
-            let modulo = (read_pointer as usize) % alignment;
-            if modulo != 0 {
-                read_pointer = read_pointer.add(alignment - ((read_pointer as usize) % alignment));
-                // Align pointer to usize alignment
-            }
+            read_pointer = align_ptr_to_usize(read_pointer.add(size));
 
             if read_pointer as usize >= end_of_buffer {
                 self.read_pointer
@@ -295,18 +266,11 @@ impl CircullarBuffer {
         }
         let only_msb_of_usize = 1 << (core::mem::size_of::<usize>() * 8 - 1);
         let mut pointer = self.release_pointer.load(Ordering::Acquire);
-        let alignment = core::mem::align_of::<usize>();
         let end_of_buffer = self as *const _ as usize + BUFFER_SIZE;
         let mut changed = false;
         unsafe {
             loop {
-                let modulo = (pointer as usize) % alignment;
-                let difference = if modulo == 0 {
-                    0
-                } else {
-                    alignment - ((pointer as usize) % alignment)
-                }; // Align pointer to usize alignment
-                pointer = pointer.add(difference);
+                pointer = align_ptr_to_usize(pointer);
 
                 let size_ref = &mut *(pointer as *mut usize);
 
